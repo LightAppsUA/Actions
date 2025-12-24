@@ -1,0 +1,139 @@
+name: Build & Upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        required: true
+      version:
+        required: true
+      build_number:
+        type: number
+      xcode_version:
+        default: '16.4'
+      token:
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mask Input Parameters
+        run: |
+          REPOSITORY=$(jq -r '.inputs.repository' "$GITHUB_EVENT_PATH")
+          TOKEN=$(jq -r '.inputs.token' "$GITHUB_EVENT_PATH")
+          echo "::add-mask::$REPOSITORY"
+          echo "::add-mask::$TOKEN"
+
+      - name: Notify webhook
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+        run: |
+          curl -X POST -F "token=${{ github.event.inputs.token }}" -F "workflow_run_id=${{ github.run_id }}" "$BASE_URL/webhook.php"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repository }}
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 1
+
+      - name: Download files from UploadTools repository
+        run: |
+          curl -X GET -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/fastlane/SharedFastfile" -o fastlane/Fastfile
+          curl -X GET -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/fastlane/Pluginfile" -o fastlane/Pluginfile
+          curl -X GET -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/Gemfile" -o Gemfile
+          curl -X GET -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/Gemfile.lock" -o Gemfile.lock
+
+      - name: Set up ruby env
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.4.7
+
+      - name: Cache bundle dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/work/vendor/bundle
+          key: ${{ runner.os }}-bundle-${{ hashFiles('**/Gemfile.lock', '**/Gemfile') }}
+          restore-keys: |
+            ${{ runner.os }}-bundle-
+
+      - name: Check if VPNExtension folder exists
+        run: |
+          if [ -n "$(find . -iname 'VPNExtension' -maxdepth 1 -type d)" ]; then
+            echo "GO_SETUP=true" >> $GITHUB_ENV
+          else
+            echo "GO_SETUP=false" >> $GITHUB_ENV
+          fi
+
+      - name: Set up go env
+        if: env.GO_SETUP == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Create symlink for Go executable
+        if: env.GO_SETUP == 'true'
+        run: |
+          GO_PATH=$(which go)
+          sudo ln -s "$GO_PATH" /usr/local/bin/go
+
+      - name: Install Bundle
+        run: |
+          bundle config set path "$HOME/work/vendor/bundle"
+          bundle install
+
+      - name: Install Pods
+        if: env.PODFILE_EXISTS == 'true'
+        run: bundle exec pod install
+
+      - name: Check if *.mlmodel files exist
+        run: |
+          if [ -n "$(find . -name '*.mlmodel' -type f)" ]; then
+            echo "COREMLTOOLS_NEEDED=true" >> $GITHUB_ENV
+          else
+            echo "COREMLTOOLS_NEEDED=false" >> $GITHUB_ENV
+          fi
+
+      - name: Install coremltools
+        if: env.COREMLTOOLS_NEEDED == 'true'
+        run: |
+          python3 -m pip install --break-system-packages coremltools
+        shell: sh
+
+      - name: Check if Appfile contains swiftshield_args
+        run: |
+          if [ -f "fastlane/Appfile" ] && grep -q "data\[:swiftshield_args\]" fastlane/Appfile; then
+            echo "SWIFTSHIELD_NEEDED=true" >> $GITHUB_ENV
+          else
+            echo "SWIFTSHIELD_NEEDED=false" >> $GITHUB_ENV
+          fi
+
+      - name: Download Swiftshield
+        if: env.SWIFTSHIELD_NEEDED == 'true'
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: 'LightAppsInternal/swiftshield'
+          fileName: 'swiftshield.zip'
+          latest: true
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Unpack and set up Swiftshield
+        if: env.SWIFTSHIELD_NEEDED == 'true'
+        run: |
+          mkdir -p swiftshield_temp
+          unzip swiftshield.zip -d swiftshield_temp
+
+          sudo mv swiftshield_temp/bin/swiftshield /usr/local/bin/
+          
+          sudo chmod +x /usr/local/bin/swiftshield
+          
+          rm -rf swiftshield_temp swiftshield.zip
+        shell: sh
+
+      - name: Build & upload
+        run: |
+          bundle exec fastlane build_upload
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+          BUILD_NUMBER: ${{ github.event.inputs.build_number }}
+          UPLOAD: false
