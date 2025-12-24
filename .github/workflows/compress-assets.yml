@@ -1,0 +1,165 @@
+name: Compress assets
+run-name: "${{ github.workflow }} [${{ inputs.correlation_id }}]"
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        required: true
+      token:
+        required: true
+      correlation_id:
+        required: false
+      force:
+        description: 'Ignore the map of already-compressed assets and squeeze everything again'
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Only report savings, do not commit'
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-${{ github.event.inputs.repository }}
+  cancel-in-progress: false
+
+env:
+  OXIPNG_VERSION: 10.1.1
+  SVGCLEANER_VERSION: 0.9.5
+
+jobs:
+  compress_assets:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Hide sensitive inputs
+        uses: levibostian/action-hide-sensitive-inputs@v1
+        with:
+          exclude_inputs: repository,correlation_id,force,dry_run
+
+      - name: Parse target repository owner
+        id: target-owner
+        env:
+          REPOSITORY: ${{ github.event.inputs.repository }}
+        run: echo "owner=${REPOSITORY%%/*}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate GitHub App token
+        uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ steps.target-owner.outputs.owner }}
+
+      - name: Get GitHub App user id
+        id: app-user
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: echo "id=$(gh api /users/${{ steps.app-token.outputs.app-slug }}%5Bbot%5D --jq .id)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.inputs.repository }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 1
+
+      - name: Checkout compression scripts
+        uses: actions/checkout@v6
+        with:
+          path: .actions
+          fetch-depth: 1
+          sparse-checkout: |
+            .github/scripts
+
+      - name: Copy compression scripts
+        run: |
+          cp -R .actions/.github/scripts "$RUNNER_TEMP/scripts"
+          rm -rf .actions
+
+      # A network flake here would fail the step, and inside a release scenario a
+      # failed step stops the chain before the build — hence the retries.
+      - name: Install image optimizers
+        env:
+          RETRY: --retry 3 --retry-delay 5 --retry-all-errors --connect-timeout 15
+        run: |
+          sudo apt-get update -qq -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            zopfli jpegoptim libjpeg-turbo-progs gifsicle
+
+          curl -fsSL $RETRY -o /tmp/oxipng.deb \
+            "https://github.com/shssoichiro/oxipng/releases/download/v${OXIPNG_VERSION}/oxipng_${OXIPNG_VERSION}-1_$(dpkg --print-architecture).deb"
+          sudo dpkg -i /tmp/oxipng.deb
+
+          if [ "$(dpkg --print-architecture)" = "amd64" ]; then
+            curl -fsSL $RETRY -o /tmp/svgcleaner.tar.gz \
+              "https://github.com/RazrFalcon/svgcleaner/releases/download/v${SVGCLEANER_VERSION}/svgcleaner_linux_x86_64_${SVGCLEANER_VERSION}.tar.gz"
+            sudo tar -xzf /tmp/svgcleaner.tar.gz -C /usr/local/bin svgcleaner
+          fi
+
+          npm install -g svgo@4
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 ffmpeg
+
+      - name: Compress assets
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MAP_FILE: compressed-assets-map.txt
+          FORCE: ${{ github.event.inputs.force }}
+          REPORT: ${{ runner.temp }}/report.tsv
+          SVGO_CONFIG: ${{ runner.temp }}/scripts/svgo.config.mjs
+        run: |
+          touch "$REPORT"
+          bash "$RUNNER_TEMP/scripts/compress-assets.sh"
+
+      - name: Report savings
+        id: report
+        env:
+          REPORT: ${{ runner.temp }}/report.tsv
+        run: |
+          awk -F'\t' '
+            { before += $1; after += $2; if ($2 < $1) { changed++; rows[NR] = $0 } }
+            END {
+              saved = before - after
+              pct = before > 0 ? saved * 100 / before : 0
+              printf "## Compressed %d of %d file(s)\n\n", changed, NR
+              printf "**%.2f MiB → %.2f MiB, saved %.2f MiB (%.1f%%)**\n\n", \
+                before / 1048576, after / 1048576, saved / 1048576, pct
+              if (changed > 0) print "| File | Before | After | Saved |\n| --- | ---: | ---: | ---: |"
+              for (i = 1; i <= NR; i++) if (i in rows) {
+                split(rows[i], c, "\t")
+                printf "| `%s` | %.1f KiB | %.1f KiB | %.1f%% |\n", \
+                  c[3], c[1] / 1024, c[2] / 1024, (c[1] - c[2]) * 100 / c[1]
+              }
+            }
+          ' "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+
+          awk -F'\t' '
+            { before += $1; after += $2; if ($2 < $1) changed++ }
+            END { printf "files=%d\nsaved=%d\n", changed, before - after }
+          ' "$REPORT" >> "$GITHUB_OUTPUT"
+
+      # Reporting back is a nicety: the badges can stay empty, but the release
+      # scenario must not stop because the admin was unreachable.
+      - name: Compression info
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+        run: |
+          jq -n --arg token "${{ github.event.inputs.token }}" \
+            --argjson files "${{ steps.report.outputs.files }}" \
+            --argjson saved "${{ steps.report.outputs.saved }}" \
+            '{token: $token, compressed_files: $files, bytes_saved: $saved}' |
+            curl -sS -X POST -H "Content-Type: application/json" -d @- \
+              --retry 3 --retry-delay 5 --retry-all-errors --connect-timeout 15 \
+              "$BASE_URL/api/deploy/workflow-metadata" || true
+
+      - name: Commit compressed assets
+        if: github.event.inputs.dry_run != 'true'
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          file_pattern: '.'
+          commit_message: 'Compress assets'
+          commit_user_name: '${{ steps.app-token.outputs.app-slug }}[bot]'
+          commit_user_email: '${{ steps.app-user.outputs.id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com'
+          commit_author: '${{ steps.app-token.outputs.app-slug }}[bot] <${{ steps.app-user.outputs.id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com>'
