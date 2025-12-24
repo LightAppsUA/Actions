@@ -1,0 +1,87 @@
+name: Upload metadata
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        required: true
+      token:
+        required: true
+      whats_new:
+      app_rating_config:
+        type: boolean
+
+jobs:
+  upload_metadata:
+    runs-on: macos-15
+    steps:
+      - name: Hide sensitive inputs
+        uses: levibostian/action-hide-sensitive-inputs@v1
+        with:
+          exclude_inputs: repository,token
+
+      - name: Notify webhook
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+        run: |
+          curl -X POST -F "token=${{ github.event.inputs.token }}" -F "workflow_run_id=${{ github.run_id }}" "$BASE_URL/webhook.php"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repository }}
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 1
+
+      - name: Checkout DeployBackend repository
+        uses: actions/checkout@v4
+        with:
+          repository: LightAppsInternal/DeployBackend
+          token: ${{ secrets.GH_TOKEN }}
+          path: deploy-backend
+          fetch-depth: 1
+
+      - name: Copy fastlane files
+        run: |
+          mkdir -p fastlane
+          cp deploy-backend/fastlane/fastlane/Fastfile fastlane/Fastfile
+          cp deploy-backend/fastlane/fastlane/Pluginfile fastlane/Pluginfile
+          cp deploy-backend/fastlane/Gemfile Gemfile
+          cp deploy-backend/fastlane/Gemfile.lock Gemfile.lock
+          rm -rf deploy-backend
+
+      - name: Set up ruby env
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.4.8
+
+      - name: Cache bundle dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/work/vendor/bundle
+          key: ${{ runner.os }}-bundle-${{ hashFiles('**/Gemfile.lock', '**/Gemfile') }}
+          restore-keys: |
+            ${{ runner.os }}-bundle-
+
+      - name: Install Bundle
+        run: |
+          bundle config set path "$HOME/work/vendor/bundle"
+          bundle install
+
+      - name: Download metadata CSV file
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+        run: |
+          curl -f -s -o fastlane/metadata.csv "$BASE_URL/metadata/${{ github.event.inputs.token }}.csv" || (rm -f fastlane/metadata.csv && echo "CSV file not found, skipping...")
+
+      - name: Upload metadata
+        run: |
+          bundle exec fastlane upload_metadata
+        env:
+          WHATS_NEW: ${{ github.event.inputs.whats_new }}
+          APP_RATING_CONFIG: ${{ github.event.inputs.app_rating_config }}
+
+      - name: Commit metadata
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          file_pattern: 'fastlane/metadata/* fastlane/metadata.csv'
+          commit_message: 'Update metadata'
