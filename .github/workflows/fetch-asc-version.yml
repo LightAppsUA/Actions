@@ -1,0 +1,118 @@
+name: Fetch ASC version
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        required: true
+      token:
+        required: true
+
+concurrency:
+  group: deploy-${{ github.event.inputs.repository }}
+  cancel-in-progress: false
+
+jobs:
+  fetch_asc_version:
+    runs-on: macos-26
+    steps:
+      - name: Hide sensitive inputs
+        uses: levibostian/action-hide-sensitive-inputs@v1
+        with:
+          exclude_inputs: repository,token
+
+      - name: Notify webhook
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+        run: |
+          curl -X POST -F "token=${{ github.event.inputs.token }}" -F "workflow_run_id=${{ github.run_id }}" "$BASE_URL/webhook.php"
+
+      - name: Parse target repository owner
+        id: target-owner
+        env:
+          REPOSITORY: ${{ github.event.inputs.repository }}
+        run: echo "owner=${REPOSITORY%%/*}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate GitHub App token
+        uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ steps.target-owner.outputs.owner }}
+
+      - name: Generate GitHub App token (LightAppsInternal)
+        uses: actions/create-github-app-token@v3
+        id: shared-app-token
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: LightAppsInternal
+
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.inputs.repository }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 1
+
+      - name: Checkout LightAppsAdmin repository
+        uses: actions/checkout@v6
+        with:
+          repository: LightAppsInternal/LightAppsAdmin
+          token: ${{ steps.shared-app-token.outputs.token }}
+          path: lightapps-admin
+          fetch-depth: 1
+          sparse-checkout: |
+            apps/deploy/fastlane
+
+      - name: Copy fastlane files
+        run: |
+          mkdir -p fastlane
+          cp lightapps-admin/apps/deploy/fastlane/fastlane/Fastfile fastlane/Fastfile
+          cp lightapps-admin/apps/deploy/fastlane/fastlane/Pluginfile fastlane/Pluginfile
+          cp lightapps-admin/apps/deploy/fastlane/Gemfile Gemfile
+          cp lightapps-admin/apps/deploy/fastlane/Gemfile.lock Gemfile.lock
+          rm -rf lightapps-admin
+
+      - name: Detect project root
+        run: |
+          if [ -d "ios" ] && [ -f "package.json" ]; then
+            echo "WORKDIR=ios" >> $GITHUB_ENV
+
+            rm -rf ios/fastlane ios/Gemfile ios/Gemfile.lock
+            mv -f fastlane Gemfile Gemfile.lock ios/
+          else
+            echo "WORKDIR=." >> $GITHUB_ENV
+          fi
+
+      - name: Set up ruby env
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 4.0.3
+
+      - name: Cache bundle dependencies
+        uses: actions/cache@v5
+        with:
+          path: ~/work/vendor/bundle
+          key: ${{ runner.os }}-bundle-${{ hashFiles('**/Gemfile.lock', '**/Gemfile') }}
+          restore-keys: |
+            ${{ runner.os }}-bundle-
+
+      - name: Install Bundle
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          bundle config set path "$HOME/work/vendor/bundle"
+          bundle install
+
+      - name: Fetch ASC version info
+        working-directory: ${{ env.WORKDIR }}
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+        run: |
+          bundle exec fastlane asc_version_info
+
+          ASC_VERSION_INFO_PATH="${TMPDIR:-/tmp}/asc_version_info.json"
+          if [ -f "$ASC_VERSION_INFO_PATH" ]; then
+            jq --arg token "${{ github.event.inputs.token }}" '. + {token: $token}' "$ASC_VERSION_INFO_PATH" > "$ASC_VERSION_INFO_PATH.tmp" && mv "$ASC_VERSION_INFO_PATH.tmp" "$ASC_VERSION_INFO_PATH"
+            curl -X POST -H "Content-Type: application/json" -d "@$ASC_VERSION_INFO_PATH" "$BASE_URL/update_workflow_run.php"
+          fi
