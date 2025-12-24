@@ -1,0 +1,102 @@
+name: Generate certificate
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        required: true
+      token:
+        required: true
+
+jobs:
+  generate_cert:
+    runs-on: macos-15
+    steps:
+      - name: Hide sensitive inputs
+        uses: levibostian/action-hide-sensitive-inputs@v1
+        with:
+          exclude_inputs: repository,token
+
+      - name: Notify webhook
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+        run: |
+          curl -X POST -F "token=${{ github.event.inputs.token }}" -F "workflow_run_id=${{ github.run_id }}" "$BASE_URL/webhook.php"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repository }}
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 1
+
+      - name: Checkout LightAppsAdmin repository
+        uses: actions/checkout@v4
+        with:
+          repository: LightAppsInternal/LightAppsAdmin
+          token: ${{ secrets.GH_TOKEN }}
+          path: lightapps-admin
+          fetch-depth: 1
+          sparse-checkout: |
+            apps/deploy/fastlane
+
+      - name: Copy fastlane files
+        run: |
+          mkdir -p fastlane
+          cp lightapps-admin/apps/deploy/fastlane/fastlane/Fastfile fastlane/Fastfile
+          cp lightapps-admin/apps/deploy/fastlane/fastlane/Pluginfile fastlane/Pluginfile
+          cp lightapps-admin/apps/deploy/fastlane/Gemfile Gemfile
+          cp lightapps-admin/apps/deploy/fastlane/Gemfile.lock Gemfile.lock
+          rm -rf lightapps-admin
+
+      - name: Detect and process React Native project
+        run: |
+          if [ -f "package.json" ] && [ -d "ios" ]; then
+            echo "Detected React Native project"
+            npm install
+            echo "WORKDIR=ios" >> $GITHUB_ENV
+
+            rm -rf ios/fastlane ios/Gemfile ios/Gemfile.lock
+
+            mv -f fastlane Gemfile Gemfile.lock ios/
+
+            echo export NODE_BINARY=$(command -v node) > ios/.xcode.env.local
+          else
+            echo "WORKDIR=." >> $GITHUB_ENV
+          fi
+
+      - name: Set up ruby env
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.4.8
+
+      - name: Cache bundle dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/work/vendor/bundle
+          key: ${{ runner.os }}-bundle-${{ hashFiles('**/Gemfile.lock', '**/Gemfile') }}
+          restore-keys: |
+            ${{ runner.os }}-bundle-
+
+      - name: Install Bundle
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          bundle config set path "$HOME/work/vendor/bundle"
+          bundle install
+
+      - name: Generate certificate
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          bundle exec fastlane generate_cert
+
+      - name: Move fastlane directory to parent directory (React Native project only)
+        if: env.WORKDIR == 'ios'
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          rm -rf ../fastlane/
+          mv -f fastlane ../
+
+      - name: Commit certificate
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          file_pattern: 'fastlane/*.*'
+          skip_dirty_check: true

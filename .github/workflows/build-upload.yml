@@ -1,0 +1,214 @@
+name: Build & Upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        required: true
+      token:
+        required: true
+      version:
+      build_number:
+        type: number
+      xcode_version:
+        default: '16.4'
+      update_spm_packages:
+        type: boolean
+        default: false
+      submit_for_review:
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    runs-on: macos-15
+    steps:
+      - name: Hide sensitive inputs
+        uses: levibostian/action-hide-sensitive-inputs@v1
+        with:
+          exclude_inputs: repository,token
+
+      - name: Notify webhook
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+        run: |
+          curl -X POST -F "token=${{ github.event.inputs.token }}" -F "workflow_run_id=${{ github.run_id }}" "$BASE_URL/webhook.php"
+
+      - name: Add auth data
+        env:
+          GH_USER: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          echo -e "machine github.com\n  login $GH_USER\n  password $GH_TOKEN\n" > ~/.netrc
+          echo -e "machine api.github.com\n  login $GH_USER\n  password $GH_TOKEN\n" >> ~/.netrc
+          chmod 0600 ~/.netrc
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repository }}
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 1
+
+      - name: Checkout LightAppsAdmin repository
+        uses: actions/checkout@v4
+        with:
+          repository: LightAppsInternal/LightAppsAdmin
+          token: ${{ secrets.GH_TOKEN }}
+          path: lightapps-admin
+          fetch-depth: 1
+          sparse-checkout: |
+            apps/deploy/fastlane
+
+      - name: Copy fastlane files
+        run: |
+          mkdir -p fastlane
+          cp lightapps-admin/apps/deploy/fastlane/fastlane/Fastfile fastlane/Fastfile
+          cp lightapps-admin/apps/deploy/fastlane/fastlane/Pluginfile fastlane/Pluginfile
+          cp lightapps-admin/apps/deploy/fastlane/Gemfile Gemfile
+          cp lightapps-admin/apps/deploy/fastlane/Gemfile.lock Gemfile.lock
+          rm -rf lightapps-admin
+
+      - name: Detect and process React Native project
+        run: |
+          if [ -f "package.json" ] && [ -d "ios" ]; then
+            echo "Detected React Native project"
+            npm install
+            echo "WORKDIR=ios" >> $GITHUB_ENV
+
+            rm -rf ios/fastlane ios/Gemfile ios/Gemfile.lock
+            
+            cp -r fastlane ios/
+            cp Gemfile Gemfile.lock ios/
+
+            echo export NODE_BINARY=$(command -v node) > ios/.xcode.env.local
+          else
+            echo "WORKDIR=." >> $GITHUB_ENV
+          fi
+
+      - name: Check if Podfile exists
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          if [ -f "Podfile" ]; then
+            echo "Podfile exists, setting PODFILE_EXISTS=true"
+            echo "PODFILE_EXISTS=true" >> $GITHUB_ENV
+          else
+            echo "Podfile does not exist, setting PODFILE_EXISTS=false"
+            echo "PODFILE_EXISTS=false" >> $GITHUB_ENV
+          fi
+
+      - name: Set up ruby env
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.4.8
+
+      - name: Cache bundle dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/work/vendor/bundle
+          key: ${{ runner.os }}-bundle-${{ hashFiles('**/Gemfile.lock', '**/Gemfile') }}
+          restore-keys: |
+            ${{ runner.os }}-bundle-
+
+      - name: Install Bundle
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          bundle config set path "$HOME/work/vendor/bundle"
+          bundle install
+
+      - name: Check if VPNExtension folder exists
+        run: |
+          if [ -n "$(find . -iname 'VPNExtension' -maxdepth 1 -type d)" ]; then
+            echo "GO_SETUP=true" >> $GITHUB_ENV
+          else
+            echo "GO_SETUP=false" >> $GITHUB_ENV
+          fi
+
+      - name: Set up go env
+        if: env.GO_SETUP == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Create symlink for Go executable
+        if: env.GO_SETUP == 'true'
+        run: |
+          GO_PATH=$(which go)
+          sudo ln -s "$GO_PATH" /usr/local/bin/go
+
+      - name: Check if *.mlmodel files exist
+        run: |
+          if [ -n "$(find . -name '*.mlmodel' -type f)" ]; then
+            echo "COREMLTOOLS_NEEDED=true" >> $GITHUB_ENV
+          else
+            echo "COREMLTOOLS_NEEDED=false" >> $GITHUB_ENV
+          fi
+
+      - name: Install coremltools
+        if: env.COREMLTOOLS_NEEDED == 'true'
+        run: python3 -m pip install --break-system-packages coremltools
+
+      - name: Check if Appfile contains swiftshield_args
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          if [ -f "fastlane/Appfile" ] && grep -q "data\[:swiftshield_args\]" fastlane/Appfile; then
+            echo "SWIFTSHIELD_NEEDED=true" >> $GITHUB_ENV
+          else
+            echo "SWIFTSHIELD_NEEDED=false" >> $GITHUB_ENV
+          fi
+
+      - name: Download Swiftshield
+        if: env.SWIFTSHIELD_NEEDED == 'true'
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: 'LightAppsInternal/swiftshield'
+          fileName: 'swiftshield.zip'
+          latest: true
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Unpack and set up Swiftshield
+        if: env.SWIFTSHIELD_NEEDED == 'true'
+        run: |
+          mkdir -p swiftshield_temp
+          unzip swiftshield.zip -d swiftshield_temp
+
+          sudo mv swiftshield_temp/bin/swiftshield /usr/local/bin/
+
+          sudo chmod +x /usr/local/bin/swiftshield
+
+          rm -rf swiftshield_temp swiftshield.zip
+
+      - name: Install Pods
+        if: env.PODFILE_EXISTS == 'true'
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          bundle exec pod install
+
+      - name: Build info
+        working-directory: ${{ env.WORKDIR }}
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+          VERSION: ${{ github.event.inputs.version }}
+          BUILD_NUMBER: ${{ github.event.inputs.build_number }}
+        run: |
+          bundle exec fastlane build_upload_info
+        
+          BUILD_INFO_PATH="${TMPDIR:-/tmp}/build_info.json"
+          if [ -f "$BUILD_INFO_PATH" ]; then
+            jq --arg token "${{ github.event.inputs.token }}" '. + {token: $token}' "$BUILD_INFO_PATH" > "$BUILD_INFO_PATH.tmp" && mv "$BUILD_INFO_PATH.tmp" "$BUILD_INFO_PATH"
+            
+            curl -X POST -H "Content-Type: application/json" -d "@$BUILD_INFO_PATH" "$BASE_URL/update_workflow_run.php"
+          fi
+
+      - name: Build & upload
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          bundle exec fastlane build_upload
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          VERSION: ${{ github.event.inputs.version }}
+          BUILD_NUMBER: ${{ github.event.inputs.build_number }}
+          XCODE_VERSION: ${{ github.event.inputs.xcode_version }}
+          UPLOAD: true
+          RUN_NUMBER: ${{ github.run_number }}
+          UPDATE_SPM_PACKAGES: ${{ github.event.inputs.update_spm_packages }}
+          SUBMIT_FOR_REVIEW: ${{ github.event.inputs.submit_for_review }}
