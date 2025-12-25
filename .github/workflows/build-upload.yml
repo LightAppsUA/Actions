@@ -39,10 +39,11 @@ jobs:
 
       - name: Download files from UploadTools repository
         run: |
-          curl -X GET -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/fastlane/SharedFastfile" -o fastlane/Fastfile
-          curl -X GET -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/fastlane/Pluginfile" -o fastlane/Pluginfile
-          curl -X GET -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/Gemfile" -o Gemfile
-          curl -X GET -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/Gemfile.lock" -o Gemfile.lock
+          mkdir -p fastlane
+          curl -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/fastlane/SharedFastfile" | jq -r '.content' | base64 -d > fastlane/Fastfile
+          curl -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/fastlane/Pluginfile" | jq -r '.content' | base64 -d > fastlane/Pluginfile
+          curl -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/Gemfile" | jq -r '.content' | base64 -d > Gemfile
+          curl -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/Gemfile.lock" | jq -r '.content' | base64 -d > Gemfile.lock
 
       - name: Set up ruby env
         uses: ruby/setup-ruby@v1
