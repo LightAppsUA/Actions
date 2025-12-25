@@ -2,10 +2,34 @@ name: Upload metadata
 
 on:
   workflow_dispatch:
+    inputs:
+      repository:
+        required: true
+      token:
+        required: true
+      whats_new:
+      app_rating_config:
+        type: boolean
 
 jobs:
   upload_metadata:
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     steps:
-      - name: Sleep 10 seconds
-        run: sleep 10
+      - name: Mask Input Parameters
+        run: |
+          REPOSITORY=$(jq -r '.inputs.repository' "$GITHUB_EVENT_PATH")
+          TOKEN=$(jq -r '.inputs.token' "$GITHUB_EVENT_PATH")
+          echo "::add-mask::$REPOSITORY"
+          echo "::add-mask::$TOKEN"
+
+      - name: Notify webhook
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+        run: |
+          curl -X POST -F "token=${{ github.event.inputs.token }}" -F "workflow_run_id=${{ github.run_id }}" "$BASE_URL/webhook.php"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repository }}
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 1

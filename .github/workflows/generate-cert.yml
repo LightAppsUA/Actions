@@ -59,7 +59,7 @@ jobs:
 
       - name: Generate certificate
         run: |
-          # bundle exec fastlane generate_cert
+          # TODO: return to - bundle exec fastlane generate_cert
           mkdir -p fastlane
           echo "fake certificate" > fastlane/test.cer
 
