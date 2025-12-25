@@ -58,7 +58,10 @@ jobs:
           bundle install
 
       - name: Generate certificate
-        run: bundle exec fastlane generate_cert
+        run: |
+          # bundle exec fastlane generate_cert
+          mkdir -p fastlane
+          echo "fake certificate" > fastlane/test.cer
 
       - name: Commit certificate
         uses: stefanzweifel/git-auto-commit-action@v7
