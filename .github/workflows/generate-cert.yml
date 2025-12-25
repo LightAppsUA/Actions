@@ -2,10 +2,66 @@ name: Generate certificate
 
 on:
   workflow_dispatch:
+    inputs:
+      repository:
+        required: true
+      token:
+        required: true
 
 jobs:
   generate_cert:
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     steps:
-      - name: Sleep 10 seconds
-        run: sleep 10
+      - name: Mask Input Parameters
+        run: |
+          REPOSITORY=$(jq -r '.inputs.repository' "$GITHUB_EVENT_PATH")
+          TOKEN=$(jq -r '.inputs.token' "$GITHUB_EVENT_PATH")
+          echo "::add-mask::$REPOSITORY"
+          echo "::add-mask::$TOKEN"
+
+      - name: Notify webhook
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+        run: |
+          curl -X POST -F "token=${{ github.event.inputs.token }}" -F "workflow_run_id=${{ github.run_id }}" "$BASE_URL/webhook.php"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repository }}
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 1
+
+      - name: Download files from UploadTools repository
+        run: |
+          mkdir -p fastlane
+          curl -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/fastlane/SharedFastfile" | jq -r '.content' | base64 -d > fastlane/Fastfile
+          curl -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/fastlane/Pluginfile" | jq -r '.content' | base64 -d > fastlane/Pluginfile
+          curl -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/Gemfile" | jq -r '.content' | base64 -d > Gemfile
+          curl -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsUA/Upload-tools/contents/fastlane/Gemfile.lock" | jq -r '.content' | base64 -d > Gemfile.lock
+
+      - name: Set up ruby env
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.4.7
+
+      - name: Cache bundle dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/work/vendor/bundle
+          key: ${{ runner.os }}-bundle-${{ hashFiles('**/Gemfile.lock', '**/Gemfile') }}
+          restore-keys: |
+            ${{ runner.os }}-bundle-
+
+      - name: Install Bundle
+        run: |
+          bundle config set path "$HOME/work/vendor/bundle"
+          bundle install
+
+      - name: Generate certificate
+        run: bundle exec fastlane generate_cert
+
+      - name: Commit certificate
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          file_pattern: 'fastlane/*'
+          skip_dirty_check: true
