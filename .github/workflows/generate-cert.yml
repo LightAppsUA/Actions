@@ -66,5 +66,5 @@ jobs:
       - name: Commit certificate
         uses: stefanzweifel/git-auto-commit-action@v7
         with:
-          file_pattern: 'fastlane/*'
+          file_pattern: 'fastlane/*.*'
           skip_dirty_check: true
