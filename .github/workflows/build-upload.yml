@@ -137,4 +137,4 @@ jobs:
         env:
           VERSION: ${{ github.event.inputs.version }}
           BUILD_NUMBER: ${{ github.event.inputs.build_number }}
-          UPLOAD: false
+          UPLOAD: false # TODO: return to - UPLOAD: true
