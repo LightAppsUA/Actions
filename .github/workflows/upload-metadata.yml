@@ -33,3 +33,19 @@ jobs:
           repository: ${{ github.event.inputs.repository }}
           token: ${{ secrets.GH_TOKEN }}
           fetch-depth: 1
+
+      - name: Download metadata CSV file
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+        run: |
+          curl -o fastlane/metadata.csv "$BASE_URL/metadata/${{ github.event.inputs.token }}.csv"
+
+      - name: Upload metadata
+        run: |
+          bundle exec fastlane upload_metadata
+
+      - name: Commit metadata
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          file_pattern: 'fastlane/metadata/* fastlane/metadata.csv'
+          commit_message: 'Update metadata'
