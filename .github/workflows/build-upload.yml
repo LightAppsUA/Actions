@@ -133,7 +133,7 @@ jobs:
 
       - name: Build & upload
         run: |
-          # return to - bundle exec fastlane build_upload
+          # TODO: return to - bundle exec fastlane build_upload
         env:
           VERSION: ${{ github.event.inputs.version }}
           BUILD_NUMBER: ${{ github.event.inputs.build_number }}

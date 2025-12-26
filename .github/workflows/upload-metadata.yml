@@ -42,7 +42,10 @@ jobs:
 
       - name: Upload metadata
         run: |
-          bundle exec fastlane upload_metadata
+          # TODO: return to - bundle exec fastlane upload_metadata
+        env:
+          WHATS_NEW: ${{ github.event.inputs.whats_new }}
+          APP_RATING_CONFIG: ${{ github.event.inputs.app_rating_config }}
 
       - name: Commit metadata
         uses: stefanzweifel/git-auto-commit-action@v7
