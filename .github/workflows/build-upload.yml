@@ -55,7 +55,7 @@ jobs:
       - name: Set up ruby env
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: 3.4.7
+          ruby-version: 3.4.8
 
       - name: Cache bundle dependencies
         uses: actions/cache@v4
@@ -64,6 +64,11 @@ jobs:
           key: ${{ runner.os }}-bundle-${{ hashFiles('**/Gemfile.lock', '**/Gemfile') }}
           restore-keys: |
             ${{ runner.os }}-bundle-
+
+      - name: Install Bundle
+        run: |
+          bundle config set path "$HOME/work/vendor/bundle"
+          bundle install
 
       - name: Check if VPNExtension folder exists
         run: |
@@ -84,11 +89,6 @@ jobs:
         run: |
           GO_PATH=$(which go)
           sudo ln -s "$GO_PATH" /usr/local/bin/go
-
-      - name: Install Bundle
-        run: |
-          bundle config set path "$HOME/work/vendor/bundle"
-          bundle install
 
       - name: Install Pods
         if: env.PODFILE_EXISTS == 'true'

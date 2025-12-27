@@ -32,6 +32,24 @@ jobs:
           token: ${{ secrets.GH_TOKEN }}
           fetch-depth: 1
 
+      - name: Set up ruby env
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.4.8
+
+      - name: Cache bundle dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/work/vendor/bundle
+          key: ${{ runner.os }}-bundle-${{ hashFiles('**/Gemfile.lock', '**/Gemfile') }}
+          restore-keys: |
+            ${{ runner.os }}-bundle-
+
+      - name: Install Bundle
+        run: |
+          bundle config set path "$HOME/work/vendor/bundle"
+          bundle install
+
       - name: Download metadata CSV file
         env:
           BASE_URL: ${{ secrets.BASE_URL }}
