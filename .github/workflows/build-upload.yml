@@ -35,13 +35,22 @@ jobs:
           token: ${{ secrets.GH_TOKEN }}
           fetch-depth: 1
 
-      - name: Download files from UploadTools repository
+      - name: Checkout DeployBackend repository
+        uses: actions/checkout@v4
+        with:
+          repository: LightAppsInternal/DeployBackend
+          token: ${{ secrets.GH_TOKEN }}
+          path: deploy-backend
+          fetch-depth: 1
+
+      - name: Copy fastlane files
         run: |
           mkdir -p fastlane
-          curl -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsInternal/DeployBackend/contents/fastlane/fastlane/Fastfile" | jq -r '.content' | base64 -d > fastlane/Fastfile
-          curl -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsInternal/DeployBackend/contents/fastlane/fastlane/Pluginfile" | jq -r '.content' | base64 -d > fastlane/Pluginfile
-          curl -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsInternal/DeployBackend/contents/fastlane/Gemfile" | jq -r '.content' | base64 -d > Gemfile
-          curl -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" "https://api.github.com/repos/LightAppsInternal/DeployBackend/contents/fastlane/Gemfile.lock" | jq -r '.content' | base64 -d > Gemfile.lock
+          cp deploy-backend/fastlane/fastlane/Fastfile fastlane/Fastfile
+          cp deploy-backend/fastlane/fastlane/Pluginfile fastlane/Pluginfile
+          cp deploy-backend/fastlane/Gemfile Gemfile
+          cp deploy-backend/fastlane/Gemfile.lock Gemfile.lock
+          rm -rf deploy-backend
 
       - name: Set up ruby env
         uses: ruby/setup-ruby@v1
