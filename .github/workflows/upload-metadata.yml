@@ -15,12 +15,10 @@ jobs:
   upload_metadata:
     runs-on: macos-15
     steps:
-      - name: Mask Input Parameters
-        run: |
-          REPOSITORY=$(jq -r '.inputs.repository' "$GITHUB_EVENT_PATH")
-          TOKEN=$(jq -r '.inputs.token' "$GITHUB_EVENT_PATH")
-          echo "::add-mask::$REPOSITORY"
-          echo "::add-mask::$TOKEN"
+      - name: Hide sensitive inputs
+        uses: levibostian/action-hide-sensitive-inputs@v1
+        with:
+          exclude_inputs: repository,token
 
       - name: Notify webhook
         env:
