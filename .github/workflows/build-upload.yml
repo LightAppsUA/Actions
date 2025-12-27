@@ -6,7 +6,6 @@ on:
       repository:
         required: true
       version:
-        required: true
       build_number:
         type: number
       xcode_version:
