@@ -12,6 +12,9 @@ on:
         type: number
       xcode_version:
         default: '16.4'
+      update_spm_packages:
+        type: boolean
+        default: false
 
 jobs:
   deploy:
@@ -173,3 +176,4 @@ jobs:
           XCODE_VERSION: ${{ github.event.inputs.xcode_version }}
           UPLOAD: true
           RUN_NUMBER: ${{ github.run_number }}
+          UPDATE_SPM_PACKAGES: ${{ github.event.inputs.update_spm_packages }}
