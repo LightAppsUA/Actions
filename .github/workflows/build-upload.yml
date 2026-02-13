@@ -74,7 +74,8 @@ jobs:
 
             rm -rf ios/fastlane ios/Gemfile ios/Gemfile.lock
             
-            mv -f fastlane Gemfile Gemfile.lock ios/
+            cp -r fastlane ios/
+            cp Gemfile Gemfile.lock ios/
 
             echo export NODE_BINARY=$(command -v node) > ios/.xcode.env.local
           else
