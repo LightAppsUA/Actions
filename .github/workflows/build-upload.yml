@@ -38,6 +38,8 @@ jobs:
         run: |
           echo -e "machine github.com\n  login $GH_USER\n  password $GH_TOKEN\n" > ~/.netrc
           echo -e "machine api.github.com\n  login $GH_USER\n  password $GH_TOKEN\n" >> ~/.netrc
+          chmod 0600 ~/.netrc
+
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.event.inputs.repository }}
