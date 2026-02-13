@@ -51,6 +51,22 @@ jobs:
           cp lightapps-admin/apps/deploy/fastlane/Gemfile.lock Gemfile.lock
           rm -rf lightapps-admin
 
+      - name: Detect and process React Native project
+        run: |
+          if [ -f "package.json" ] && [ -d "ios" ]; then
+            echo "Detected React Native project"
+            npm install
+            echo "WORKDIR=ios" >> $GITHUB_ENV
+
+            rm -rf ios/fastlane ios/Gemfile ios/Gemfile.lock
+
+            mv -f fastlane Gemfile Gemfile.lock ios/
+
+            echo export NODE_BINARY=$(command -v node) > ios/.xcode.env.local
+          else
+            echo "WORKDIR=." >> $GITHUB_ENV
+          fi
+
       - name: Set up ruby env
         uses: ruby/setup-ruby@v1
         with:
@@ -65,17 +81,20 @@ jobs:
             ${{ runner.os }}-bundle-
 
       - name: Install Bundle
+        working-directory: ${{ env.WORKDIR }}
         run: |
           bundle config set path "$HOME/work/vendor/bundle"
           bundle install
 
       - name: Download metadata CSV file
+        working-directory: ${{ env.WORKDIR }}
         env:
           BASE_URL: ${{ secrets.BASE_URL }}
         run: |
           curl -f -s -o fastlane/metadata.csv "$BASE_URL/metadata/${{ github.event.inputs.token }}.csv" || (rm -f fastlane/metadata.csv && echo "CSV file not found, skipping...")
 
       - name: Metadata info
+        working-directory: ${{ env.WORKDIR }}
         env:
           BASE_URL: ${{ secrets.BASE_URL }}
         run: |
@@ -89,6 +108,7 @@ jobs:
           fi
 
       - name: Upload metadata
+        working-directory: ${{ env.WORKDIR }}
         run: |
           bundle exec fastlane upload_metadata
         env:
@@ -97,12 +117,20 @@ jobs:
 
       - name: Check if metadata CSV exists
         id: check_csv
+        working-directory: ${{ env.WORKDIR }}
         run: |
           if [ -f fastlane/metadata.csv ]; then
             echo "file_pattern=fastlane/metadata/* fastlane/metadata.csv" >> $GITHUB_OUTPUT
           else
             echo "file_pattern=fastlane/metadata/*" >> $GITHUB_OUTPUT
           fi
+
+      - name: Move fastlane directory to parent directory (React Native project only)
+        if: env.WORKDIR == 'ios'
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          rm -rf ../fastlane/
+          mv -f fastlane ../
 
       - name: Commit metadata
         uses: stefanzweifel/git-auto-commit-action@v7

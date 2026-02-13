@@ -38,8 +38,6 @@ jobs:
         run: |
           echo -e "machine github.com\n  login $GH_USER\n  password $GH_TOKEN\n" > ~/.netrc
           echo -e "machine api.github.com\n  login $GH_USER\n  password $GH_TOKEN\n" >> ~/.netrc
-        shell: sh
-
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.event.inputs.repository }}
@@ -65,6 +63,33 @@ jobs:
           cp lightapps-admin/apps/deploy/fastlane/Gemfile.lock Gemfile.lock
           rm -rf lightapps-admin
 
+      - name: Detect and process React Native project
+        run: |
+          if [ -f "package.json" ] && [ -d "ios" ]; then
+            echo "Detected React Native project"
+            npm install
+            echo "WORKDIR=ios" >> $GITHUB_ENV
+
+            rm -rf ios/fastlane ios/Gemfile ios/Gemfile.lock
+            
+            mv -f fastlane Gemfile Gemfile.lock ios/
+
+            echo export NODE_BINARY=$(command -v node) > ios/.xcode.env.local
+          else
+            echo "WORKDIR=." >> $GITHUB_ENV
+          fi
+
+      - name: Check if Podfile exists
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          if [ -f "Podfile" ]; then
+            echo "Podfile exists, setting PODFILE_EXISTS=true"
+            echo "PODFILE_EXISTS=true" >> $GITHUB_ENV
+          else
+            echo "Podfile does not exist, setting PODFILE_EXISTS=false"
+            echo "PODFILE_EXISTS=false" >> $GITHUB_ENV
+          fi
+
       - name: Set up ruby env
         uses: ruby/setup-ruby@v1
         with:
@@ -79,6 +104,7 @@ jobs:
             ${{ runner.os }}-bundle-
 
       - name: Install Bundle
+        working-directory: ${{ env.WORKDIR }}
         run: |
           bundle config set path "$HOME/work/vendor/bundle"
           bundle install
@@ -103,10 +129,6 @@ jobs:
           GO_PATH=$(which go)
           sudo ln -s "$GO_PATH" /usr/local/bin/go
 
-      - name: Install Pods
-        if: env.PODFILE_EXISTS == 'true'
-        run: bundle exec pod install
-
       - name: Check if *.mlmodel files exist
         run: |
           if [ -n "$(find . -name '*.mlmodel' -type f)" ]; then
@@ -117,11 +139,10 @@ jobs:
 
       - name: Install coremltools
         if: env.COREMLTOOLS_NEEDED == 'true'
-        run: |
-          python3 -m pip install --break-system-packages coremltools
-        shell: sh
+        run: python3 -m pip install --break-system-packages coremltools
 
       - name: Check if Appfile contains swiftshield_args
+        working-directory: ${{ env.WORKDIR }}
         run: |
           if [ -f "fastlane/Appfile" ] && grep -q "data\[:swiftshield_args\]" fastlane/Appfile; then
             echo "SWIFTSHIELD_NEEDED=true" >> $GITHUB_ENV
@@ -145,13 +166,19 @@ jobs:
           unzip swiftshield.zip -d swiftshield_temp
 
           sudo mv swiftshield_temp/bin/swiftshield /usr/local/bin/
-          
+
           sudo chmod +x /usr/local/bin/swiftshield
-          
+
           rm -rf swiftshield_temp swiftshield.zip
-        shell: sh
+
+      - name: Install Pods
+        if: env.PODFILE_EXISTS == 'true'
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          bundle exec pod install
 
       - name: Build info
+        working-directory: ${{ env.WORKDIR }}
         env:
           BASE_URL: ${{ secrets.BASE_URL }}
           VERSION: ${{ github.event.inputs.version }}
@@ -167,6 +194,7 @@ jobs:
           fi
 
       - name: Build & upload
+        working-directory: ${{ env.WORKDIR }}
         run: |
           bundle exec fastlane build_upload
         env:
