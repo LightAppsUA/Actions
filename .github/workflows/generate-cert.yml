@@ -8,6 +8,10 @@ on:
       token:
         required: true
 
+concurrency:
+  group: deploy-${{ github.event.inputs.repository }}
+  cancel-in-progress: false
+
 jobs:
   generate_cert:
     runs-on: macos-15

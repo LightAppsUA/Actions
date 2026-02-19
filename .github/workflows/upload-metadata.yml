@@ -11,6 +11,10 @@ on:
       app_rating_config:
         type: boolean
 
+concurrency:
+  group: deploy-${{ github.event.inputs.repository }}
+  cancel-in-progress: false
+
 jobs:
   upload_metadata:
     runs-on: macos-15
