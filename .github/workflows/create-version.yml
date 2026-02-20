@@ -1,0 +1,104 @@
+name: Create version
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        required: true
+      token:
+        required: true
+      version:
+
+concurrency:
+  group: deploy-${{ github.event.inputs.repository }}
+  cancel-in-progress: false
+
+jobs:
+  create_version:
+    runs-on: macos-15
+    steps:
+      - name: Hide sensitive inputs
+        uses: levibostian/action-hide-sensitive-inputs@v1
+        with:
+          exclude_inputs: repository,token
+
+      - name: Notify webhook
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+        run: |
+          curl -X POST -F "token=${{ github.event.inputs.token }}" -F "workflow_run_id=${{ github.run_id }}" "$BASE_URL/webhook.php"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repository }}
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 1
+
+      - name: Checkout LightAppsAdmin repository
+        uses: actions/checkout@v4
+        with:
+          repository: LightAppsInternal/LightAppsAdmin
+          token: ${{ secrets.GH_TOKEN }}
+          path: lightapps-admin
+          fetch-depth: 1
+          sparse-checkout: |
+            apps/deploy/fastlane
+
+      - name: Copy fastlane files
+        run: |
+          mkdir -p fastlane
+          cp lightapps-admin/apps/deploy/fastlane/fastlane/Fastfile fastlane/Fastfile
+          cp lightapps-admin/apps/deploy/fastlane/fastlane/Pluginfile fastlane/Pluginfile
+          cp lightapps-admin/apps/deploy/fastlane/Gemfile Gemfile
+          cp lightapps-admin/apps/deploy/fastlane/Gemfile.lock Gemfile.lock
+          rm -rf lightapps-admin
+
+      - name: Detect and process React Native project
+        run: |
+          if [ -f "package.json" ] && [ -d "ios" ]; then
+            echo "Detected React Native project"
+            npm install
+            echo "WORKDIR=ios" >> $GITHUB_ENV
+
+            rm -rf ios/fastlane ios/Gemfile ios/Gemfile.lock
+
+            mv -f fastlane Gemfile Gemfile.lock ios/
+
+            echo export NODE_BINARY=$(command -v node) > ios/.xcode.env.local
+          else
+            echo "WORKDIR=." >> $GITHUB_ENV
+          fi
+
+      - name: Set up ruby env
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.4.8
+
+      - name: Cache bundle dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/work/vendor/bundle
+          key: ${{ runner.os }}-bundle-${{ hashFiles('**/Gemfile.lock', '**/Gemfile') }}
+          restore-keys: |
+            ${{ runner.os }}-bundle-
+
+      - name: Install Bundle
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          bundle config set path "$HOME/work/vendor/bundle"
+          bundle install
+
+      - name: Create version
+        working-directory: ${{ env.WORKDIR }}
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          bundle exec fastlane create_version
+
+          VERSION_INFO_PATH="${TMPDIR:-/tmp}/version_info.json"
+          if [ -f "$VERSION_INFO_PATH" ]; then
+            jq --arg token "${{ github.event.inputs.token }}" '. + {token: $token}' "$VERSION_INFO_PATH" > "$VERSION_INFO_PATH.tmp" && mv "$VERSION_INFO_PATH.tmp" "$VERSION_INFO_PATH"
+
+            curl -X POST -H "Content-Type: application/json" -d "@$VERSION_INFO_PATH" "$BASE_URL/update_workflow_run.php"
+          fi
