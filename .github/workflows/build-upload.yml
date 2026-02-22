@@ -216,3 +216,14 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
           UPDATE_SPM_PACKAGES: ${{ github.event.inputs.update_spm_packages }}
           SUBMIT_FOR_REVIEW: ${{ github.event.inputs.submit_for_review }}
+
+      - name: Send submit-for-review result
+        if: github.event.inputs.submit_for_review == 'true'
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+        run: |
+          SUBMIT_INFO_PATH="${TMPDIR:-/tmp}/submit_for_review_info.json"
+          if [ -f "$SUBMIT_INFO_PATH" ]; then
+            jq --arg token "${{ github.event.inputs.token }}" '. + {token: $token}' "$SUBMIT_INFO_PATH" > "$SUBMIT_INFO_PATH.tmp" && mv "$SUBMIT_INFO_PATH.tmp" "$SUBMIT_INFO_PATH"
+            curl -X POST -H "Content-Type: application/json" -d "@$SUBMIT_INFO_PATH" "$BASE_URL/update_workflow_run.php"
+          fi
