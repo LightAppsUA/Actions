@@ -11,7 +11,7 @@ on:
       build_number:
         type: number
       xcode_version:
-        default: '16.4'
+        default: '26.3'
       update_dependencies:
         type: boolean
         default: false
