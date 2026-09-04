@@ -1,0 +1,302 @@
+name: Build & Upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        required: true
+      token:
+        required: true
+      version:
+      build_number:
+        type: number
+      xcode_version:
+        default: '26.3'
+      update_dependencies:
+        type: boolean
+        default: false
+      submit_for_review:
+        type: boolean
+        default: false
+      review_contact_phone:
+        required: false
+
+concurrency:
+  group: deploy-${{ github.event.inputs.repository }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  deploy:
+    runs-on: macos-26
+    steps:
+      - name: Hide sensitive inputs
+        uses: levibostian/action-hide-sensitive-inputs@v1
+        with:
+          exclude_inputs: repository
+
+      - name: Parse target repository owner
+        id: target-owner
+        env:
+          REPOSITORY: ${{ github.event.inputs.repository }}
+        run: echo "owner=${REPOSITORY%%/*}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate GitHub App token
+        uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ steps.target-owner.outputs.owner }}
+
+      - name: Generate GitHub App token (LightAppsInternal)
+        uses: actions/create-github-app-token@v3
+        id: shared-app-token
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: LightAppsInternal
+
+      - name: Get GitHub App user id
+        id: app-user
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: echo "id=$(gh api /users/${{ steps.app-token.outputs.app-slug }}%5Bbot%5D --jq .id)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure git identity
+        run: |
+          git config --global user.name '${{ steps.app-token.outputs.app-slug }}[bot]'
+          git config --global user.email '${{ steps.app-user.outputs.id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com'
+
+      # One place owns git's credentials: a file this job writes, read at the moment git asks.
+      # An app token lives an hour and a build can run longer, so anything that stores the token
+      # - a header in the repository config, a ~/.netrc - is stale by the end, and refreshing
+      # this file is all it takes to hand every later git command a live one. The empty value
+      # clears the helpers configured before us (Xcode ships a gitconfig registering
+      # osxkeychain, which is consulted first) so that ours is the only one asked. The path is
+      # resolved now rather than when the helper runs: xcodebuild drives git through wrappers of
+      # its own, and a helper that needed $RUNNER_TEMP in its environment would hand back an
+      # empty password wherever that environment is not passed on. checkout persists nothing for
+      # the same reason - two stores mean two Authorization headers, and GitHub answers those
+      # with a 400.
+      - name: Add auth data
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          install -m 0600 /dev/null "$RUNNER_TEMP/gh_token"
+          printf '%s' "$GH_TOKEN" > "$RUNNER_TEMP/gh_token"
+          git config --global --replace-all credential.helper ""
+          git config --global --add credential.helper \
+            "!f() { echo username=x-access-token; echo \"password=\$(cat $RUNNER_TEMP/gh_token)\"; }; f"
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ github.event.inputs.repository }}
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout LightAppsAdmin repository
+        uses: actions/checkout@v7
+        with:
+          repository: LightAppsInternal/LightAppsAdmin
+          ref: main
+          token: ${{ steps.shared-app-token.outputs.token }}
+          path: lightapps-admin
+          fetch-depth: 1
+          sparse-checkout: |
+            deploy
+
+      - name: Copy fastlane files
+        run: |
+          mkdir -p fastlane
+          cp lightapps-admin/deploy/fastlane/Fastfile fastlane/Fastfile
+          cp lightapps-admin/deploy/fastlane/Pluginfile fastlane/Pluginfile
+          cp lightapps-admin/deploy/Gemfile Gemfile
+          cp lightapps-admin/deploy/Gemfile.lock Gemfile.lock
+          rm -rf lightapps-admin
+
+      - name: Detect and process React Native project
+        run: |
+          if [ -f "package.json" ] && [ -d "ios" ]; then
+            echo "Detected React Native project"
+            npm install --no-audit --no-fund --loglevel=error
+            echo "WORKDIR=ios" >> $GITHUB_ENV
+
+            rm -rf ios/fastlane ios/Gemfile ios/Gemfile.lock
+            
+            cp -r fastlane ios/
+            cp Gemfile Gemfile.lock ios/
+
+            echo export NODE_BINARY=$(command -v node) > ios/.xcode.env.local
+          else
+            echo "WORKDIR=." >> $GITHUB_ENV
+          fi
+
+      - name: Check if Podfile exists
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          if [ -f "Podfile" ]; then
+            echo "Podfile exists, setting PODFILE_EXISTS=true"
+            echo "PODFILE_EXISTS=true" >> $GITHUB_ENV
+          else
+            echo "Podfile does not exist, setting PODFILE_EXISTS=false"
+            echo "PODFILE_EXISTS=false" >> $GITHUB_ENV
+          fi
+
+      - name: Set up ruby env
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 4.0.3
+
+      - name: Cache bundle dependencies
+        uses: actions/cache@v6
+        with:
+          path: ~/work/vendor/bundle
+          key: ${{ runner.os }}-bundle-${{ hashFiles('**/Gemfile.lock', '**/Gemfile') }}
+          restore-keys: |
+            ${{ runner.os }}-bundle-
+
+      - name: Install Bundle
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          bundle config set path "$HOME/work/vendor/bundle"
+          bundle install --quiet
+
+      - name: Check if VPNExtension folder exists
+        run: |
+          if [ -n "$(find . -iname 'VPNExtension' -maxdepth 1 -type d)" ]; then
+            echo "GO_SETUP=true" >> $GITHUB_ENV
+          else
+            echo "GO_SETUP=false" >> $GITHUB_ENV
+          fi
+
+      - name: Set up go env
+        if: env.GO_SETUP == 'true'
+        uses: actions/setup-go@v7
+        with:
+          go-version: 'stable'
+
+      - name: Create symlink for Go executable
+        if: env.GO_SETUP == 'true'
+        run: |
+          GO_PATH=$(which go)
+          sudo ln -s "$GO_PATH" /usr/local/bin/go
+
+      - name: Check if *.mlmodel files exist
+        run: |
+          if [ -n "$(find . -name '*.mlmodel' -type f)" ]; then
+            echo "COREMLTOOLS_NEEDED=true" >> $GITHUB_ENV
+          else
+            echo "COREMLTOOLS_NEEDED=false" >> $GITHUB_ENV
+          fi
+
+      - name: Install coremltools
+        if: env.COREMLTOOLS_NEEDED == 'true'
+        run: python3 -m pip install --break-system-packages coremltools
+
+      - name: Check if Appfile contains swiftshield_args
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          if [ -f "fastlane/Appfile" ] && grep -q "data\[:swiftshield_args\]" fastlane/Appfile; then
+            echo "SWIFTSHIELD_NEEDED=true" >> $GITHUB_ENV
+          else
+            echo "SWIFTSHIELD_NEEDED=false" >> $GITHUB_ENV
+          fi
+
+      - name: Download Swiftshield
+        if: env.SWIFTSHIELD_NEEDED == 'true'
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: 'LightAppsInternal/swiftshield'
+          fileName: 'swiftshield.zip'
+          latest: true
+          token: ${{ steps.shared-app-token.outputs.token }}
+
+      - name: Unpack and set up Swiftshield
+        if: env.SWIFTSHIELD_NEEDED == 'true'
+        run: |
+          mkdir -p swiftshield_temp
+          unzip -q swiftshield.zip -d swiftshield_temp
+
+          sudo mv swiftshield_temp/bin/swiftshield /usr/local/bin/
+
+          sudo chmod +x /usr/local/bin/swiftshield
+
+          rm -rf swiftshield_temp swiftshield.zip
+
+      - name: Install Pods
+        if: env.PODFILE_EXISTS == 'true'
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          bundle exec pod install --silent
+
+      - name: Build info
+        working-directory: ${{ env.WORKDIR }}
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+          VERSION: ${{ github.event.inputs.version }}
+          BUILD_NUMBER: ${{ github.event.inputs.build_number }}
+        run: |
+          bundle exec fastlane build_upload_info
+        
+          BUILD_INFO_PATH="${TMPDIR:-/tmp}/build_info.json"
+          if [ -f "$BUILD_INFO_PATH" ]; then
+            jq --arg token "${{ github.event.inputs.token }}" '. + {token: $token}' "$BUILD_INFO_PATH" > "$BUILD_INFO_PATH.tmp" && mv "$BUILD_INFO_PATH.tmp" "$BUILD_INFO_PATH"
+            
+            curl -X POST -H "Content-Type: application/json" -d "@$BUILD_INFO_PATH" "$BASE_URL/api/deploy/workflow-metadata"
+          fi
+
+      - name: Build & upload
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          bundle exec fastlane build_upload
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ github.event.inputs.version }}
+          BUILD_NUMBER: ${{ github.event.inputs.build_number }}
+          XCODE_VERSION: ${{ github.event.inputs.xcode_version }}
+          UPLOAD: true
+          RUN_NUMBER: ${{ github.run_number }}
+          UPDATE_DEPENDENCIES: ${{ github.event.inputs.update_dependencies }}
+          SUBMIT_FOR_REVIEW: ${{ github.event.inputs.submit_for_review }}
+          REVIEW_CONTACT_PHONE: ${{ github.event.inputs.review_contact_phone }}
+
+      - name: Generate GitHub App token (tag & release)
+        uses: actions/create-github-app-token@v3
+        id: tag-token
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ steps.target-owner.outputs.owner }}
+
+      - name: Create tag and release
+        working-directory: ${{ env.WORKDIR }}
+        env:
+          GH_TOKEN: ${{ steps.tag-token.outputs.token }}
+        run: |
+          TAG_INFO_PATH="${TMPDIR:-/tmp}/tag_info.json"
+          if [ ! -f "$TAG_INFO_PATH" ]; then
+            echo "No tag_info.json — the lane tagged on its own, nothing to do"
+            exit 0
+          fi
+          TAG=$(jq -r .tag "$TAG_INFO_PATH")
+          COMMIT=$(jq -r .commit "$TAG_INFO_PATH")
+
+          # The token the build started with has expired by now; the helper picks this one up.
+          printf '%s' "$GH_TOKEN" > "$RUNNER_TEMP/gh_token"
+
+          git tag "$TAG" "$COMMIT"
+          git push origin "refs/tags/$TAG"
+          gh release create "$TAG" --generate-notes
+
+      - name: Send submit-for-review result
+        if: github.event.inputs.submit_for_review == 'true'
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+        run: |
+          SUBMIT_INFO_PATH="${TMPDIR:-/tmp}/submit_for_review_info.json"
+          if [ -f "$SUBMIT_INFO_PATH" ]; then
+            jq --arg token "${{ github.event.inputs.token }}" '. + {token: $token}' "$SUBMIT_INFO_PATH" > "$SUBMIT_INFO_PATH.tmp" && mv "$SUBMIT_INFO_PATH.tmp" "$SUBMIT_INFO_PATH"
+            curl -X POST -H "Content-Type: application/json" -d "@$SUBMIT_INFO_PATH" "$BASE_URL/api/deploy/workflow-metadata"
+          fi
